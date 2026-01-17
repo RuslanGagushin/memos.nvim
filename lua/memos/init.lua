@@ -1,4 +1,8 @@
+---@diagnostic disable: undefined-global
 local M = {}
+M.tags = {}
+M.tags_loaded = false
+M.tags_loading = false
 
 local default_config = {
     base_url = '',
@@ -73,6 +77,264 @@ local function build_update_body(content, cfg, memo)
         return cfg.update_body(content, cfg, memo)
     end
     return { content = content }
+end
+
+local function normalize_tag(tag)
+    if type(tag) ~= 'string' or tag == '' then
+        return nil
+    end
+    if tag:sub(1, 1) == '#' then
+        tag = tag:sub(2)
+    end
+    if tag == '' then
+        return nil
+    end
+    return tag
+end
+
+local function add_tags(tag_set, tags)
+    if type(tags) ~= 'table' then
+        return
+    end
+    for _, tag in ipairs(tags) do
+        local normalized = normalize_tag(tag)
+        if normalized then
+            tag_set[normalized] = true
+        end
+    end
+end
+
+local function extract_tags_from_text(text)
+    local tags = {}
+    if type(text) ~= 'string' then
+        return tags
+    end
+    for tag in text:gmatch('#([%w_-]+)') do
+        tags[#tags + 1] = tag
+    end
+    return tags
+end
+
+local function update_tag_cache(memo)
+    if type(memo) ~= 'table' then
+        return
+    end
+    if type(memo.tags) == 'table' then
+        add_tags(M.tags, memo.tags)
+    end
+    if type(memo.content) == 'string' then
+        add_tags(M.tags, extract_tags_from_text(memo.content))
+    end
+end
+
+local function find_tag_completion()
+    local line = vim.api.nvim_get_current_line()
+    local col = vim.fn.col('.')
+    local start = col
+    while start > 1 and line:sub(start - 1, start - 1):match('[%w_-]') do
+        start = start - 1
+    end
+    if start > 1 and line:sub(start - 1, start - 1) == '#' then
+        local hash_pos = start - 1
+        if line:sub(1, hash_pos):match('^%s*#+$') then
+            return nil, nil
+        end
+        local base = line:sub(start, col - 1)
+        return start, base
+    end
+    return nil, nil
+end
+
+local function tag_candidates(prefix)
+    local items = {}
+    if type(M.tags) ~= 'table' then
+        return items
+    end
+    local lookup = M.tags
+    local needle = prefix or ''
+    for tag in pairs(lookup) do
+        if needle == '' or tag:sub(1, #needle) == needle then
+            items[#items + 1] = tag
+        end
+    end
+    table.sort(items)
+    return items
+end
+
+local function maybe_trigger_tag_complete()
+    if vim.fn.pumvisible() == 1 then
+        return
+    end
+    local start, base = find_tag_completion()
+    if not start then
+        return
+    end
+    local items = tag_candidates(base)
+    if #items == 0 then
+        return
+    end
+    vim.fn.complete(start, items)
+end
+
+local function request_async(method, path, body, callback)
+    local cfg = M.config
+    if not cfg or cfg.base_url == '' then
+        callback(nil, 'memos: base_url is not configured')
+        return
+    end
+
+    local url = normalize_url(cfg.base_url, path)
+    local cmd = { cfg.curl_path, '-sS', '-L', '-X', method, url, '-H', 'Accept: application/json' }
+    if cfg.token and cfg.token ~= '' then
+        table.insert(cmd, '-H')
+        table.insert(cmd, 'Authorization: Bearer ' .. cfg.token)
+    end
+    if body ~= nil then
+        table.insert(cmd, '-H')
+        table.insert(cmd, 'Content-Type: application/json')
+        table.insert(cmd, '-d')
+        table.insert(cmd, vim.json.encode(body))
+    end
+
+    local stdout_chunks = {}
+    local stderr_chunks = {}
+    local function collect(target, data)
+        if not data or #data == 0 then
+            return
+        end
+        local joined = table.concat(data, '\n')
+        if joined ~= '' then
+            target[#target + 1] = joined
+        end
+    end
+
+    local job_id = vim.fn.jobstart(cmd, {
+        stdout_buffered = true,
+        stderr_buffered = true,
+        on_stdout = function(_, data) collect(stdout_chunks, data) end,
+        on_stderr = function(_, data) collect(stderr_chunks, data) end,
+        on_exit = function(_, code)
+            vim.schedule(function()
+                local output = table.concat(stdout_chunks, '\n')
+                if code ~= 0 then
+                    local err = table.concat(stderr_chunks, '\n')
+                    if err == '' then
+                        err = output
+                    end
+                    callback(nil, err)
+                    return
+                end
+                if output == '' then
+                    callback({}, nil)
+                    return
+                end
+                local trimmed = output:gsub('^%s+', ''):gsub('%s+$', '')
+                if trimmed == '' then
+                    callback({}, nil)
+                    return
+                end
+                if trimmed:sub(1, 1) == '<' then
+                    callback(nil, 'memos: non-JSON response (HTML) for ' .. url .. ': ' .. trimmed:sub(1, 200))
+                    return
+                end
+                local start = trimmed:find('[%[{]')
+                local last = nil
+                for i = #trimmed, 1, -1 do
+                    local ch = trimmed:sub(i, i)
+                    if ch == '}' or ch == ']' then
+                        last = i
+                        break
+                    end
+                end
+                local candidate = trimmed
+                if start and last and last >= start then
+                    candidate = trimmed:sub(start, last)
+                end
+                local ok, data = pcall(vim.json.decode, candidate)
+                if not ok then
+                    callback(nil, 'memos: failed to decode JSON response: ' .. candidate:sub(1, 200))
+                    return
+                end
+                callback(data, nil)
+            end)
+        end,
+    })
+
+    if job_id <= 0 then
+        callback(nil, 'memos: failed to start curl job')
+    end
+end
+
+local function fetch_tag_cache_from_api_async()
+    local cfg = M.config
+    if not cfg or cfg.base_url == '' then
+        M.tags_loading = false
+        return
+    end
+    local pages = 0
+    local function fetch_page(page_token)
+        local path = '/memos?pageSize=' .. tostring(cfg.page_size)
+        if page_token and page_token ~= '' then
+            path = path .. '&pageToken=' .. vim.uri_encode(page_token)
+        end
+        request_async('GET', path, nil, function(payload, err)
+            if err then
+                notify(err, vim.log.levels.ERROR)
+                M.tags_loading = false
+                return
+            end
+            local memos = extract_memos(payload)
+            for _, memo in ipairs(memos) do
+                update_tag_cache(memo)
+            end
+            local next_token = payload and (payload.nextPageToken or payload.next_page_token)
+            if not next_token or next_token == '' then
+                M.tags_loading = false
+                return
+            end
+            pages = pages + 1
+            if pages > 1000 then
+                notify('memos: tag cache pagination limit exceeded', vim.log.levels.WARN)
+                M.tags_loading = false
+                return
+            end
+            fetch_page(next_token)
+        end)
+    end
+    fetch_page(nil)
+end
+
+local function ensure_tag_cache()
+    if M.tags_loaded or M.tags_loading then
+        return
+    end
+    M.tags_loaded = true
+    M.tags_loading = true
+    fetch_tag_cache_from_api_async()
+end
+
+function _G.memos_tag_omnifunc(findstart, base)
+    if findstart == 1 then
+        ensure_tag_cache()
+        local start = find_tag_completion()
+        if not start then
+            return -1
+        end
+        return start - 1
+    end
+    local prefix = base or ''
+    if prefix:sub(1, 1) == '#' then
+        prefix = prefix:sub(2)
+    end
+    ensure_tag_cache()
+    return tag_candidates(prefix)
+end
+
+local function apply_tag_highlight(buf)
+    vim.api.nvim_set_hl(0, 'MemosTag', { link = 'Special', default = true })
+    vim.api.nvim_buf_call(buf, function()
+        vim.cmd('syntax match MemosTag /#\\w[\\w_-]*/')
+    end)
 end
 
 local function request(method, path, body)
@@ -193,11 +455,21 @@ local function open_memo_buffer(memo, is_new)
     vim.bo[buf].bufhidden = 'wipe'
     vim.bo[buf].swapfile = false
     vim.bo[buf].filetype = M.config.memo_filetype or 'markdown'
+    apply_tag_highlight(buf)
+    vim.bo[buf].omnifunc = 'v:lua.memos_tag_omnifunc'
 
     vim.api.nvim_create_autocmd('BufWriteCmd', {
         buffer = buf,
         callback = function() M.save_current() end,
         desc = 'Save memo via Memos API',
+    })
+    vim.api.nvim_create_autocmd('TextChangedI', {
+        buffer = buf,
+        callback = function()
+            ensure_tag_cache()
+            maybe_trigger_tag_complete()
+        end,
+        desc = 'Trigger tag completion for memos',
     })
 
     if is_new then
@@ -208,6 +480,7 @@ local function open_memo_buffer(memo, is_new)
     if memo then
         vim.b[buf].memos_resource = memo_resource(memo)
         vim.b[buf].memos_visibility = memo.visibility
+        update_tag_cache(memo)
     end
     vim.bo[buf].modified = false
 
@@ -269,6 +542,7 @@ function M.open_list()
     local lines = {}
     local lookup = {}
     for _, memo in ipairs(memos) do
+        update_tag_cache(memo)
         lines[#lines + 1] = format_memo_line(memo, cfg.list_preview_length)
         lookup[#lines] = memo
     end
@@ -312,6 +586,7 @@ function M.save_current()
     local cfg = M.config
     maybe_format_buffer(buf)
     local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+    add_tags(M.tags, extract_tags_from_text(content))
 
     if vim.b[buf].memos_new then
         local body = build_create_body(content, cfg)
