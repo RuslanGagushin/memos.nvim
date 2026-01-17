@@ -361,7 +361,7 @@ end
 local function apply_tag_highlight(buf)
     vim.api.nvim_set_hl(0, 'MemosTag', { link = 'Special', default = true })
     vim.api.nvim_buf_call(buf, function()
-        vim.cmd('syntax match MemosTag /#\\w[\\w_-]*/')
+        vim.cmd([[syntax match MemosTag /#[[:alnum:]_-]\+/]])
     end)
 end
 
@@ -467,6 +467,47 @@ local function format_memo_line(memo, max_len)
     return string.format('%s | %s', id, summary)
 end
 
+local function open_memo_list(memos)
+    local cfg = M.config
+    local lines = {}
+    local lookup = {}
+    for _, memo in ipairs(memos or {}) do
+        update_tag_cache(memo)
+        lines[#lines + 1] = format_memo_line(memo, cfg.list_preview_length)
+        lookup[#lines] = memo
+    end
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].buftype = 'nofile'
+    vim.bo[buf].bufhidden = 'wipe'
+    vim.bo[buf].swapfile = false
+    vim.bo[buf].filetype = 'memos-list'
+
+    vim.api.nvim_buf_set_var(buf, 'memos_items', lookup)
+
+    vim.keymap.set('n', 'q', function()
+        close_window(vim.api.nvim_get_current_win())
+    end, { buffer = buf, desc = 'Close memos list' })
+    vim.keymap.set('n', 'r', function() M.open_list() end, { buffer = buf, desc = 'Refresh memos list' })
+    vim.keymap.set('n', 'n', function() M.new_memo() end, { buffer = buf, desc = 'New memo' })
+    vim.keymap.set('n', '<CR>', function()
+        local line = vim.api.nvim_win_get_cursor(0)[1]
+        local items = vim.api.nvim_buf_get_var(buf, 'memos_items')
+        local memo = items[line]
+        if not memo then
+            notify('No memo on this line', vim.log.levels.WARN)
+            return
+        end
+        memo = fetch_memo_details(memo)
+        open_memo_buffer(memo, false)
+    end, { buffer = buf, desc = 'Open memo' })
+
+    vim.api.nvim_set_current_buf(buf)
+    vim.bo[buf].modified = false
+    return buf
+end
+
 local function open_memo_buffer(memo, is_new)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, buffer_name_for_memo(memo, is_new))
@@ -567,42 +608,31 @@ function M.open_list()
     end
 
     local memos = extract_memos(payload)
-    local lines = {}
-    local lookup = {}
-    for _, memo in ipairs(memos) do
-        update_tag_cache(memo)
-        lines[#lines + 1] = format_memo_line(memo, cfg.list_preview_length)
-        lookup[#lines] = memo
+    open_memo_list(memos)
+end
+
+function M.search(query)
+    if type(query) ~= 'string' then
+        return
     end
-
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].buftype = 'nofile'
-    vim.bo[buf].bufhidden = 'wipe'
-    vim.bo[buf].swapfile = false
-    vim.bo[buf].filetype = 'memos-list'
-
-    vim.api.nvim_buf_set_var(buf, 'memos_items', lookup)
-
-    vim.keymap.set('n', 'q', function()
-        close_window(vim.api.nvim_get_current_win())
-    end, { buffer = buf, desc = 'Close memos list' })
-    vim.keymap.set('n', 'r', function() M.open_list() end, { buffer = buf, desc = 'Refresh memos list' })
-    vim.keymap.set('n', 'n', function() M.new_memo() end, { buffer = buf, desc = 'New memo' })
-    vim.keymap.set('n', '<CR>', function()
-        local line = vim.api.nvim_win_get_cursor(0)[1]
-        local items = vim.api.nvim_buf_get_var(buf, 'memos_items')
-        local memo = items[line]
-        if not memo then
-            notify('No memo on this line', vim.log.levels.WARN)
-            return
-        end
-        memo = fetch_memo_details(memo)
-        open_memo_buffer(memo, false)
-    end, { buffer = buf, desc = 'Open memo' })
-
-    vim.api.nvim_set_current_buf(buf)
-    vim.bo[buf].modified = false
+    local trimmed = query:match('^%s*(.-)%s*$')
+    if not trimmed or trimmed == '' then
+        notify('memos: empty search query', vim.log.levels.WARN)
+        return
+    end
+    local cfg = M.config
+    local path = '/memos?pageSize=' .. tostring(cfg.page_size) .. '&search=' .. vim.uri_encode(trimmed)
+    local payload, err = request('GET', path, nil)
+    if err then
+        notify(err, vim.log.levels.ERROR)
+        return
+    end
+    local memos = extract_memos(payload)
+    if #memos == 0 then
+        notify('No memos found for: ' .. trimmed, vim.log.levels.INFO)
+        return
+    end
+    open_memo_list(memos)
 end
 
 function M.new_memo()
@@ -657,6 +687,7 @@ function M.setup(opts)
     vim.api.nvim_create_user_command('Memos', function() M.open_list() end, {})
     vim.api.nvim_create_user_command('MemosNew', function() M.new_memo() end, {})
     vim.api.nvim_create_user_command('MemosSave', function() M.save_current() end, {})
+    vim.api.nvim_create_user_command('MemosSearch', function(opts) M.search(opts.args) end, { nargs = '+' })
 end
 
 return M
