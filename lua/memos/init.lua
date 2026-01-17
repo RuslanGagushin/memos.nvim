@@ -4,6 +4,8 @@ M.tags = {}
 M.tags_loaded = false
 M.tags_loading = false
 
+local extract_memos
+
 local default_config = {
     base_url = '',
     token = '',
@@ -394,7 +396,7 @@ local function request(method, path, body)
     return data, nil
 end
 
-local function extract_memos(payload)
+extract_memos = function(payload)
     if type(payload) ~= 'table' then
         return {}
     end
