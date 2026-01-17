@@ -468,6 +468,8 @@ local function format_memo_line(memo, max_len)
 end
 
 local fetch_memo_details
+local open_memo_buffer
+local close_window
 
 local function open_memo_list(memos)
     local cfg = M.config
@@ -510,7 +512,7 @@ local function open_memo_list(memos)
     return buf
 end
 
-local function open_memo_buffer(memo, is_new)
+open_memo_buffer = function(memo, is_new)
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, buffer_name_for_memo(memo, is_new))
     vim.api.nvim_set_current_buf(buf)
@@ -575,7 +577,7 @@ fetch_memo_details = function(memo)
     return extract_memo(payload)
 end
 
-local function close_window(win)
+close_window = function(win)
     if win and vim.api.nvim_win_is_valid(win) then
         vim.api.nvim_win_close(win, true)
     end
