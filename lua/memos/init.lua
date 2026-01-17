@@ -82,9 +82,13 @@ local function build_update_body(content, cfg, memo)
 end
 
 local function normalize_tag(tag)
+    if type(tag) == 'table' then
+        tag = tag.name or tag.tag
+    end
     if type(tag) ~= 'string' or tag == '' then
         return nil
     end
+    tag = tag:match('^%s*(.-)%s*$')
     if tag:sub(1, 1) == '#' then
         tag = tag:sub(2)
     end
@@ -98,10 +102,22 @@ local function add_tags(tag_set, tags)
     if type(tags) ~= 'table' then
         return
     end
-    for _, tag in ipairs(tags) do
+    local function add(tag)
         local normalized = normalize_tag(tag)
         if normalized then
             tag_set[normalized] = true
+        end
+    end
+    local has_array = false
+    for _, tag in ipairs(tags) do
+        has_array = true
+        add(tag)
+    end
+    for key, tag in pairs(tags) do
+        if type(key) == 'string' then
+            add(key)
+        elseif not has_array and tag ~= nil and type(tag) ~= 'boolean' then
+            add(tag)
         end
     end
 end
@@ -114,6 +130,12 @@ local function extract_tags_from_text(text)
     for tag in text:gmatch('#([%w_-]+)') do
         tags[#tags + 1] = tag
     end
+    for line in text:gmatch('[^\n]+') do
+        local header = line:match('^%s*#+%s*([^#].-)%s*$')
+        if header and header ~= '' then
+            tags[#tags + 1] = header
+        end
+    end
     return tags
 end
 
@@ -121,8 +143,11 @@ local function update_tag_cache(memo)
     if type(memo) ~= 'table' then
         return
     end
-    if type(memo.tags) == 'table' then
+    if memo.tags ~= nil then
         add_tags(M.tags, memo.tags)
+    end
+    if memo.relations ~= nil and type(memo.relations) == 'table' then
+        add_tags(M.tags, memo.relations)
     end
     if type(memo.content) == 'string' then
         add_tags(M.tags, extract_tags_from_text(memo.content))
@@ -137,10 +162,6 @@ local function find_tag_completion()
         start = start - 1
     end
     if start > 1 and line:sub(start - 1, start - 1) == '#' then
-        local hash_pos = start - 1
-        if line:sub(1, hash_pos):match('^%s*#+$') then
-            return nil, nil
-        end
         local base = line:sub(start, col - 1)
         return start, base
     end
@@ -175,7 +196,9 @@ local function maybe_trigger_tag_complete()
     if #items == 0 then
         return
     end
-    vim.fn.complete(start, items)
+    vim.fn.complete(start, vim.tbl_map(function(item)
+        return { word = item, abbr = '#' .. item }
+    end, items))
 end
 
 local function request_async(method, path, body, callback)
@@ -329,7 +352,10 @@ function _G.memos_tag_omnifunc(findstart, base)
         prefix = prefix:sub(2)
     end
     ensure_tag_cache()
-    return tag_candidates(prefix)
+    local items = tag_candidates(prefix)
+    return vim.tbl_map(function(item)
+        return { word = item, abbr = '#' .. item }
+    end, items)
 end
 
 local function apply_tag_highlight(buf)
