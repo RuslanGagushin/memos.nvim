@@ -467,6 +467,8 @@ local function format_memo_line(memo, max_len)
     return string.format('%s | %s', id, summary)
 end
 
+local fetch_memo_details
+
 local function open_memo_list(memos)
     local cfg = M.config
     local lines = {}
@@ -557,7 +559,7 @@ local function open_memo_buffer(memo, is_new)
     return buf
 end
 
-local function fetch_memo_details(memo)
+fetch_memo_details = function(memo)
     if memo and memo.content then
         return memo
     end
