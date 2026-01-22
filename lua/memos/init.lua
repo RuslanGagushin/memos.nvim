@@ -739,7 +739,7 @@ function M.open_tags_view()
         local node = lookup[line]
         if node then
             close_window(vim.api.nvim_get_current_win())
-            M.search("#" .. node.full_path)
+            M.filter_by_tag(node.full_path)
         end
     end
 
@@ -809,6 +809,28 @@ function M.search(query)
     local memos = extract_memos(payload)
     if #memos == 0 then
         notify('No memos found for: ' .. trimmed, vim.log.levels.INFO)
+        return
+    end
+    open_memo_list(memos)
+end
+
+
+
+function M.filter_by_tag(tag)
+    if type(tag) ~= 'string' or tag == '' then
+        return
+    end
+    local cfg = M.config
+    local filter = string.format("tag in ['%s']", tag)
+    local path = '/memos?pageSize=' .. tostring(cfg.page_size) .. '&filter=' .. vim.uri_encode(filter)
+    local payload, err = request('GET', path, nil)
+    if err then
+        notify(err, vim.log.levels.ERROR)
+        return
+    end
+    local memos = extract_memos(payload)
+    if #memos == 0 then
+        notify('No memos found with tag: ' .. tag, vim.log.levels.INFO)
         return
     end
     open_memo_list(memos)
