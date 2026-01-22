@@ -7,6 +7,7 @@ M.tag_view_state = {}
 
 local extract_memos
 local refresh_all_tag_views
+local fetch_all_memos_async
 
 local default_config = {
     base_url = '',
@@ -287,12 +288,14 @@ local function request_async(method, path, body, callback)
     end
 end
 
-local function fetch_tag_cache_from_api_async()
+fetch_all_memos_async = function(callback)
     local cfg = M.config
     if not cfg or cfg.base_url == '' then
-        M.tags_loading = false
+        if callback then callback({}, 'memos: base_url is not configured') end
         return
     end
+
+    local all_memos = {}
     local pages = 0
     local function fetch_page(page_token)
         local path = '/memos?pageSize=' .. tostring(cfg.page_size)
@@ -301,32 +304,46 @@ local function fetch_tag_cache_from_api_async()
         end
         request_async('GET', path, nil, function(payload, err)
             if err then
-                notify(err, vim.log.levels.ERROR)
-                M.tags_loading = false
+                if callback then callback(nil, err) end
                 return
             end
             local memos = extract_memos(payload)
             for _, memo in ipairs(memos) do
-                update_tag_cache(memo)
+                table.insert(all_memos, memo)
             end
-            refresh_all_tag_views()
+            
             local next_token = payload and (payload.nextPageToken or payload.next_page_token)
             if not next_token or next_token == '' then
-                M.tags_loading = false
-                refresh_all_tag_views()
+                if callback then callback(all_memos, nil) end
                 return
             end
             pages = pages + 1
             if pages > 1000 then
-                notify('memos: tag cache pagination limit exceeded', vim.log.levels.WARN)
-                M.tags_loading = false
-                refresh_all_tag_views()
+                if callback then callback(all_memos, 'memos: pagination limit exceeded') end
                 return
             end
             fetch_page(next_token)
         end)
     end
     fetch_page(nil)
+end
+
+local function fetch_tag_cache_from_api_async()
+    M.tags_loading = true
+    fetch_all_memos_async(function(memos, err)
+        if err and err ~= 'memos: pagination limit exceeded' then
+            notify(err, vim.log.levels.ERROR)
+            M.tags_loading = false
+            return
+        end
+        if memos then
+            for _, memo in ipairs(memos) do
+                update_tag_cache(memo)
+            end
+        end
+        M.tags_loading = false
+        refresh_all_tag_views()
+    end)
 end
 
 local function ensure_tag_cache()
@@ -790,15 +807,46 @@ function M.open_list()
     open_memo_list(memos)
 end
 
+function M.fuzzy_search()
+    notify("Fetching all memos for fuzzy search...", vim.log.levels.INFO)
+    fetch_all_memos_async(function(memos, err)
+        if err and err ~= 'memos: pagination limit exceeded' then
+            notify(err, vim.log.levels.ERROR)
+            return
+        end
+        if not memos or #memos == 0 then
+            notify("No memos found", vim.log.levels.INFO)
+            return
+        end
+
+        local cfg = M.config
+        
+        vim.ui.select(memos, {
+            prompt = 'Memos Fuzzy Search',
+            format_item = function(item)
+                return format_memo_line(item, cfg.list_preview_length)
+            end,
+        }, function(choice)
+            if not choice then return end
+            choice = fetch_memo_details(choice)
+            open_memo_buffer(choice, false)
+        end)
+    end)
+end
+
 function M.search(query)
-    if type(query) ~= 'string' then
+    -- If no query provided, use fuzzy search
+    if type(query) ~= 'string' or query == '' then
+        M.fuzzy_search()
         return
     end
+
     local trimmed = query:match('^%s*(.-)%s*$')
     if not trimmed or trimmed == '' then
-        notify('memos: empty search query', vim.log.levels.WARN)
+        M.fuzzy_search()
         return
     end
+    
     local cfg = M.config
     local path = '/memos?pageSize=' .. tostring(cfg.page_size) .. '&search=' .. vim.uri_encode(trimmed)
     local payload, err = request('GET', path, nil)
@@ -888,7 +936,7 @@ function M.setup(opts)
     vim.api.nvim_create_user_command('Memos', function() M.open_list() end, {})
     vim.api.nvim_create_user_command('MemosNew', function() M.new_memo() end, {})
     vim.api.nvim_create_user_command('MemosSave', function() M.save_current() end, {})
-    vim.api.nvim_create_user_command('MemosSearch', function(opts) M.search(opts.args) end, { nargs = '+' })
+    vim.api.nvim_create_user_command('MemosSearch', function(opts) M.search(opts.args) end, { nargs = '*' })
     vim.api.nvim_create_user_command('MemosTags', function() M.open_tags_view() end, {})
 end
 
