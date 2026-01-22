@@ -134,8 +134,7 @@ local function extract_tags_from_text(text)
     end
     return tags
 end
-    return tags
-end
+
 
 local function update_tag_cache(memo)
     if type(memo) ~= 'table' then
