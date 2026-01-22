@@ -6,6 +6,7 @@ M.tags_loading = false
 M.tag_view_state = {}
 
 local extract_memos
+local refresh_all_tag_views
 
 local default_config = {
     base_url = '',
@@ -689,7 +690,7 @@ local function render_tags_buffer(buf)
     vim.api.nvim_buf_set_var(buf, 'memos_tag_lookup', lookup)
 end
 
-local function refresh_all_tag_views()
+refresh_all_tag_views = function()
     for buf, _ in pairs(M.tag_views) do
         if vim.api.nvim_buf_is_valid(buf) then
             vim.schedule(function()
