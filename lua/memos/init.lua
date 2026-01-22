@@ -3,6 +3,7 @@ local M = {}
 M.tags = {}
 M.tags_loaded = false
 M.tags_loading = false
+M.tag_view_state = {}
 
 local extract_memos
 
@@ -603,6 +604,143 @@ local function maybe_format_buffer(buf)
     })
 end
 
+local function render_tags_buffer(buf)
+    local state = vim.api.nvim_buf_get_var(buf, 'memos_tag_tree')
+    local lines = {}
+    local lookup = {}
+
+    local function traverse(nodes, depth)
+        for _, node in ipairs(nodes) do
+            local prefix = string.rep("  ", depth)
+            local icon = "  "
+            if #node.children > 0 then
+                icon = node.expanded and "▼ " or "▶ "
+            end
+            table.insert(lines, prefix .. icon .. node.name)
+            table.insert(lookup, node)
+            if node.expanded then
+                traverse(node.children, depth + 1)
+            end
+        end
+    end
+
+    traverse(state, 0)
+
+    vim.api.nvim_set_option_value('modifiable', true, { buf = buf })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
+    vim.api.nvim_buf_set_var(buf, 'memos_tag_lookup', lookup)
+end
+
+function M.open_tags_view()
+    ensure_tag_cache()
+
+    local root = {}
+    local keys = {}
+    for tag in pairs(M.tags) do
+        table.insert(keys, tag)
+    end
+    table.sort(keys)
+
+    local function find_or_create(list, name, full_path)
+        for _, n in ipairs(list) do
+            if n.name == name then
+                return n
+            end
+        end
+        local n = {
+            name = name,
+            full_path = full_path,
+            children = {},
+            expanded = M.tag_view_state and M.tag_view_state[full_path] or false,
+        }
+        table.insert(list, n)
+        return n
+    end
+
+    for _, tag in ipairs(keys) do
+        local parts = {}
+        for part in tag:gmatch("[^/]+") do
+            table.insert(parts, part)
+        end
+
+        local current_list = root
+        local path = ""
+        for i, part in ipairs(parts) do
+            path = path == "" and part or path .. "/" .. part
+            local node = find_or_create(current_list, part, path)
+            current_list = node.children
+        end
+    end
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, "memos://tags")
+    vim.api.nvim_set_option_value('buftype', 'nofile', { buf = buf })
+    vim.api.nvim_set_option_value('filetype', 'memos-tags', { buf = buf })
+    vim.api.nvim_set_option_value('swapfile', false, { buf = buf })
+    vim.api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
+
+    vim.api.nvim_buf_set_var(buf, 'memos_tag_tree', root)
+
+    local function toggle()
+        local line = vim.fn.line('.')
+        local lookup = vim.api.nvim_buf_get_var(buf, 'memos_tag_lookup')
+        if not lookup or #lookup == 0 then return end
+        local node = lookup[line]
+        if node and #node.children > 0 then
+            node.expanded = not node.expanded
+            if not M.tag_view_state then
+                M.tag_view_state = {}
+            end
+            M.tag_view_state[node.full_path] = node.expanded
+            render_tags_buffer(buf)
+        end
+    end
+
+    local function select()
+        local line = vim.fn.line('.')
+        local lookup = vim.api.nvim_buf_get_var(buf, 'memos_tag_lookup')
+        if not lookup or #lookup == 0 then return end
+        local node = lookup[line]
+        if node then
+            close_window(vim.api.nvim_get_current_win())
+            M.search("#" .. node.full_path)
+        end
+    end
+
+    vim.keymap.set('n', '<Space>', toggle, { buffer = buf, silent = true })
+    vim.keymap.set('n', '<Tab>', toggle, { buffer = buf, silent = true })
+    vim.keymap.set('n', 'o', toggle, { buffer = buf, silent = true })
+    vim.keymap.set('n', '<CR>', select, { buffer = buf, silent = true })
+    vim.keymap.set('n', 'q', function()
+        close_window(vim.api.nvim_get_current_win())
+    end, { buffer = buf, silent = true })
+    vim.keymap.set('n', '<Esc>', function()
+        close_window(vim.api.nvim_get_current_win())
+    end, { buffer = buf, silent = true })
+
+    local width = 40
+    local height = 20
+    local ui = vim.api.nvim_list_uis()[1]
+    local row = math.floor((ui.height - height) / 2)
+    local col = math.floor((ui.width - width) / 2)
+
+    local win_opts = {
+        relative = 'editor',
+        width = width,
+        height = height,
+        row = row,
+        col = col,
+        style = 'minimal',
+        border = 'rounded',
+        title = ' Tags ',
+        title_pos = 'center',
+    }
+
+    local win = vim.api.nvim_open_win(buf, true, win_opts)
+    render_tags_buffer(buf)
+end
+
 function M.open_list()
     local cfg = M.config
     local payload, err = request('GET', '/memos?pageSize=' .. tostring(cfg.page_size), nil)
@@ -692,6 +830,7 @@ function M.setup(opts)
     vim.api.nvim_create_user_command('MemosNew', function() M.new_memo() end, {})
     vim.api.nvim_create_user_command('MemosSave', function() M.save_current() end, {})
     vim.api.nvim_create_user_command('MemosSearch', function(opts) M.search(opts.args) end, { nargs = '+' })
+    vim.api.nvim_create_user_command('MemosTags', function() M.open_tags_view() end, {})
 end
 
 return M
