@@ -132,12 +132,8 @@ local function extract_tags_from_text(text)
     for tag in text:gmatch('#([%w_-]+)') do
         tags[#tags + 1] = tag
     end
-    for line in text:gmatch('[^\n]+') do
-        local header = line:match('^%s*#+%s*([^#].-)%s*$')
-        if header and header ~= '' then
-            tags[#tags + 1] = header
-        end
-    end
+    return tags
+end
     return tags
 end
 
