@@ -313,15 +313,18 @@ local function fetch_tag_cache_from_api_async()
             for _, memo in ipairs(memos) do
                 update_tag_cache(memo)
             end
+            refresh_all_tag_views()
             local next_token = payload and (payload.nextPageToken or payload.next_page_token)
             if not next_token or next_token == '' then
                 M.tags_loading = false
+                refresh_all_tag_views()
                 return
             end
             pages = pages + 1
             if pages > 1000 then
                 notify('memos: tag cache pagination limit exceeded', vim.log.levels.WARN)
                 M.tags_loading = false
+                refresh_all_tag_views()
                 return
             end
             fetch_page(next_token)
@@ -604,37 +607,9 @@ local function maybe_format_buffer(buf)
     })
 end
 
-local function render_tags_buffer(buf)
-    local state = vim.api.nvim_buf_get_var(buf, 'memos_tag_tree')
-    local lines = {}
-    local lookup = {}
+M.tag_views = {}
 
-    local function traverse(nodes, depth)
-        for _, node in ipairs(nodes) do
-            local prefix = string.rep("  ", depth)
-            local icon = "  "
-            if #node.children > 0 then
-                icon = node.expanded and "▼ " or "▶ "
-            end
-            table.insert(lines, prefix .. icon .. node.name)
-            table.insert(lookup, node)
-            if node.expanded then
-                traverse(node.children, depth + 1)
-            end
-        end
-    end
-
-    traverse(state, 0)
-
-    vim.api.nvim_set_option_value('modifiable', true, { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
-    vim.api.nvim_buf_set_var(buf, 'memos_tag_lookup', lookup)
-end
-
-function M.open_tags_view()
-    ensure_tag_cache()
-
+local function build_tag_tree_data()
     local root = {}
     local keys = {}
     for tag in pairs(M.tags) do
@@ -672,6 +647,62 @@ function M.open_tags_view()
             current_list = node.children
         end
     end
+    return root
+end
+
+local function render_tags_buffer(buf)
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    
+    local root = build_tag_tree_data()
+    vim.api.nvim_buf_set_var(buf, 'memos_tag_tree', root)
+    
+    local lines = {}
+    local lookup = {}
+
+    local function traverse(nodes, depth)
+        for _, node in ipairs(nodes) do
+            local prefix = string.rep("  ", depth)
+            local icon = "  "
+            if #node.children > 0 then
+                icon = node.expanded and "▼ " or "▶ "
+            end
+            table.insert(lines, prefix .. icon .. node.name)
+            table.insert(lookup, node)
+            if node.expanded then
+                traverse(node.children, depth + 1)
+            end
+        end
+    end
+
+    if M.tags_loading and #root == 0 then
+        lines = { "Loading tags..." }
+    else
+        traverse(root, 0)
+        if #lines == 0 then
+             lines = { "No tags found." }
+        end
+    end
+
+    vim.api.nvim_set_option_value('modifiable', true, { buf = buf })
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
+    vim.api.nvim_buf_set_var(buf, 'memos_tag_lookup', lookup)
+end
+
+local function refresh_all_tag_views()
+    for buf, _ in pairs(M.tag_views) do
+        if vim.api.nvim_buf_is_valid(buf) then
+            vim.schedule(function()
+                render_tags_buffer(buf)
+            end)
+        else
+            M.tag_views[buf] = nil
+        end
+    end
+end
+
+function M.open_tags_view()
+    ensure_tag_cache()
 
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, "memos://tags")
@@ -680,7 +711,15 @@ function M.open_tags_view()
     vim.api.nvim_set_option_value('swapfile', false, { buf = buf })
     vim.api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
 
-    vim.api.nvim_buf_set_var(buf, 'memos_tag_tree', root)
+    M.tag_views[buf] = true
+    
+    -- Cleanup on wipe
+    vim.api.nvim_create_autocmd("BufWipeout", {
+        buffer = buf,
+        callback = function()
+            M.tag_views[buf] = nil
+        end
+    })
 
     local function toggle()
         local line = vim.fn.line('.')
@@ -738,6 +777,8 @@ function M.open_tags_view()
     }
 
     local win = vim.api.nvim_open_win(buf, true, win_opts)
+    
+    -- Initial render
     render_tags_buffer(buf)
 end
 
